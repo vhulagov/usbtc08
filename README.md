@@ -110,6 +110,11 @@ Optionally, specify the duration (in seconds) of the logging session and the sam
 $ python usbtc08_logger.py log 60 1500
 ```
 
+Connect the TC-08 to the PC and start a logging session with uploading to InfluxDB:
+```bash
+$ python usbtc08_db_logger.py log
+```
+
 Links
 ===
 
