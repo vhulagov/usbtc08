@@ -1,0 +1,31 @@
+---
+deskew: True
+sampling: 901 # ms
+duration: 600 # s
+upload_interval: 1 # s
+database: thermal_measurements
+channels:
+  1:
+    name: Channel_1
+    thermocouple_type: K
+  2:
+    name: Channel_2
+    thermocouple_type: K
+  3:
+    name: Channel_3
+    thermocouple_type: K
+  4:
+    name: Channel_4
+    thermocouple_type: K
+  5:
+    name: Channel_5
+    thermocouple_type: K
+  6:
+    name: Channel_6
+    thermocouple_type: K
+  7:
+    name: Channel_7
+    thermocouple_type: K
+  8:
+    name: Channel_8
+    thermocouple_type: K

@@ -1,10 +1,9 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 #coding=utf-8
 
 # Pico Technology TC-08 datalogger
 
 import os
-import datetime
 from collections import OrderedDict
 import sys
 import time
@@ -12,6 +11,10 @@ import atexit
 import logging
 
 import usbtc08
+import yaml
+import requests
+import threading
+
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -23,7 +26,7 @@ logger = logging.getLogger()
 
 MAINS = 50
 DESKEW = False
-#TODO Read config from yaml
+DATABASE = "thermal_measurements"
 
 # Set thermocouple type for each channel: B, E, J, K, N, R, S or T.
 # Set to ' ' to disable a channel. Less active channels allow faster logging rates.
@@ -163,7 +166,14 @@ class usbtc08_logger():
             self.set_channel(i, CHANNEL_CONFIG.get(i))
         self.set_mains(MAINS)
 
-    def logging(self, duration, interval):
+    def uploader(self, temp_items):
+        url = "http://lava.qat.yadro.com:8086/write?db=" + DATABASE
+        headers = {'Content-Type': 'text/plain'}
+        for item in temp_items:
+            payload = f"temperature,channel={item['channel_name']} value={item['temperature']}"
+            requests.request("POST", url, headers=headers, data=payload)
+
+    def logging(self, duration, interval, upload_interval = 1):
         self.duration = duration
         if (interval > self.get_minimum_interval_ms()):
             self.interval = interval
@@ -175,27 +185,32 @@ class usbtc08_logger():
         # Start sampling at the maximum rate
         self.run(self.interval)
         timestamp = 0
+        start_time = time.time()
+        temp_items = []
         while timestamp < duration:
             for i in CHANNEL_CONFIG:
                 # Only record active channels
                 if CHANNEL_CONFIG.get(i) != ' ':
                     if DESKEW:
                         logger.debug("deskew")
-                        samples = self.get_temp_deskew(i)
+                        samples, item = self.get_temp_deskew(i)
                     else:
-                        samples = self.get_temp(i)
+                        samples, item = self.get_temp(i)
+                    temp_items += item
                     last_timestamp = self.process_data(i, samples)
                     if last_timestamp > timestamp:
                         timestamp = last_timestamp
-            # Sleep until new data should be available
+            if start_time + upload_interval <= time.time():
+                threading.Thread(target=self.uploader, args=(temp_items,)).start()
+                start_time = time.time()
+                temp_items = []
             time.sleep(self.interval / 1000);
+        threading.Thread(target=self.uploader, args=(temp_items,)).start()
         # Stop sampling
         self.stop()
 
     def test(self):
         logger.info("Entered test function.'")
-        #self.get_unit_info()
-        #self.get_unit_info2()
         self.get_formatted_info()
         self.get_single()
 
@@ -205,7 +220,6 @@ class usbtc08_logger():
             self.data.append(OrderedDict())
 
     def process_data(self, channel, samples):
-#        logger.debug("Processing %i samples of channel %i.'.format(samples, channel)")
         if samples > 0:
             time_data = []
             temp_data = []
@@ -350,6 +364,8 @@ class usbtc08_logger():
 
     def get_temp(self, channel):
         result = usbtc08.usb_tc08_get_temp(self.handle, self.tempbuffer, self.timebuffer, usbtc08.USBTC08_MAX_SAMPLE_BUFFER, self.flags, channel, self.unit, 0)
+        measurements = []
+        cur_time = round(time.time())
         if result:
             logger.debug("Received result:" + str(result))
         samples = 0
@@ -363,13 +379,15 @@ class usbtc08_logger():
             logger.debug("Read {0} samples to the buffer".format(samples))
             pass
         for i in range(0, samples):
-            logger.debug("{0} {1}".format(self.timebuffer[i], self.tempbuffer[i]))
-            #print("Flags: %s'.format"{0:b}".format(self.flags[0]).zfill(9)")
-        return samples
+            logger.debug("{0} {1} {2}".format(self.timebuffer[i], CHANNEL_NAME[channel], self.tempbuffer[i]))
+            measurements.append({'channel_name': CHANNEL_NAME[channel], 'temperature': self.tempbuffer[i], 'timestamp': cur_time})
+        return samples, measurements
 
     def get_temp_deskew(self, channel):
         result = usbtc08.usb_tc08_get_temp_deskew(self.handle, self.tempbuffer, self.timebuffer, usbtc08.USBTC08_MAX_SAMPLE_BUFFER, self.flags, channel, self.unit, 0)
         samples = 0
+        measurements = []
+        cur_time = round(time.time())
         if result == -1:
             raise usbtc08_error(usbtc08.usb_tc08_get_last_error(self.handle), 'Reading deskewed data of channel')
         elif result == 0:
@@ -379,9 +397,9 @@ class usbtc08_logger():
             samples = result
             logger.debug("Read {0} samples to the buffer".format(samples))
         for i in range(0, samples):
-            logger.debug("{0} {1}".format(self.timebuffer[i], self.tempbuffer[i]))
-            #print("Flags: %s'.format"{0:b}".format(self.flags[0]).zfill(9)")
-        return samples
+            logger.debug("{0} {1} {2}".format(self.timebuffer[i], CHANNEL_NAME[channel], self.tempbuffer[i]))
+            measurements.append({'channel_name': CHANNEL_NAME[channel], 'temperature': self.tempbuffer[i], 'timestamp': cur_time})
+        return samples, measurements
 
     def stop(self):
         result = usbtc08.usb_tc08_stop(self.handle)
@@ -395,10 +413,8 @@ class usbtc08_logger():
         if result == 0:
             raise usbtc08_error(usbtc08.usb_tc08_get_last_error(self.handle), 'Take single measurement of all channels')
         else:
-            i = 1
-            #logger.debug('Channel {0}: {1}'.format(i, self.channelbuffer[i]))
             logger.debug("Take a single measurement of all channels")
-            for i in range(0, 9):
+            for i in range(1, 9):
                 logger.debug("Channel {0}: {1}".format(i, self.channelbuffer[i]))
 
     def unit_celsius(self):
@@ -428,19 +444,39 @@ class usbtc08_logger():
         else:
             logger.debug("Unit closed successfully")
 
+def config_loader():
+    global DESKEW
+    global CHANNEL_NAME
+    global CHANNEL_CONFIG
+    global DATABASE
+    try:
+        with open(os.path.join(sys.path[0], 'config.yaml')) as file:
+            config = yaml.full_load(file)
+            DESKEW = config['deskew']
+            DATABASE = config['database']
+            for key, value in config['channels'].items():
+                CHANNEL_NAME[key] = value['name']
+                CHANNEL_CONFIG[key] = value['thermocouple_type']
+    except FileNotFoundError:
+        raise 'Configuration file not found'
+    else:
+        return config
+
 if __name__ == '__main__':
     # Read mode as first argument
     mode = 'help'
     if len(sys.argv) > 1:
         mode = sys.argv[1]
+    params = config_loader()
     # Read logging duration as second argument or default to 60 seconds
-    duration = int(sys.argv[2]) if len(sys.argv) > 2 else 60
+    duration = int(sys.argv[2]) if len(sys.argv) > 2 else params['duration']
     # Read sample interval (in ms) as default to as fast as possible
-    interval = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+    interval = int(sys.argv[3]) if len(sys.argv) > 3 else params['sampling']
+    print(interval)
     if mode == 'log':
         device = usbtc08_logger()
         logger.info("Enter logging mode")
-        device.logging(duration, interval)
+        device.logging(duration, interval, upload_interval=params['upload_interval'])
     elif mode == 'test':
         device = usbtc08_logger()
         logger.info("Enter test mode")
